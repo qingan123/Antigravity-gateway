@@ -66,8 +66,9 @@ func (c *UpstreamClient) NewUpstreamRequest(ctx context.Context, method, targetU
 	req.Header.Set("Accept", "application/json, text/event-stream")
 	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36")
 	// Upstream authentication - NEVER forward downstream auth
-	if c.cfg.UpstreamAuthMode == "bearer" && c.cfg.UpstreamAPIKey != "" {
-		req.Header.Set("Authorization", "Bearer "+c.cfg.UpstreamAPIKey)
+	_, upstreamKey, authMode := c.cfg.UpstreamSettings()
+	if authMode == "bearer" && upstreamKey != "" {
+		req.Header.Set("Authorization", "Bearer "+upstreamKey)
 	}
 
 	if reqID != "" {

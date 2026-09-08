@@ -116,12 +116,36 @@ func (h *AdminHandler) HandleRevokeKey(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (h *AdminHandler) RegisterRoutes(mux *http.ServeMux) {
-	adminAuth := func(handler http.HandlerFunc) http.Handler {
-		return h.AuthMiddleware(handler)
+func (h *AdminHandler) HandleRevealKey(w http.ResponseWriter, r *http.Request) {
+	path := strings.TrimPrefix(r.URL.Path, "/admin/keys/")
+	id := strings.TrimSuffix(path, "/reveal")
+	id = strings.Trim(id, "/")
+	key, err := h.mgr.RevealKey(id)
+	if err != nil {
+		server.WriteError(w, http.StatusNotFound, "Key not found or unavailable", "invalid_request_error", "key_not_found")
+		return
 	}
+	server.WriteJSON(w, http.StatusOK, map[string]string{"id": id, "key": key})
+}
 
+func (h *AdminHandler) HandleDeleteKey(w http.ResponseWriter, r *http.Request) {
+	id := strings.Trim(strings.TrimPrefix(r.URL.Path, "/admin/keys/"), "/")
+	if err := h.mgr.DeleteKey(id); err != nil {
+		if errors.Is(err, ErrKeyNotFound) {
+			server.WriteError(w, http.StatusNotFound, "Key not found", "invalid_request_error", "key_not_found")
+			return
+		}
+		server.WriteError(w, http.StatusInternalServerError, "Failed to delete key", "api_error", "internal_error")
+		return
+	}
+	server.WriteJSON(w, http.StatusOK, map[string]string{"id": id, "status": "deleted"})
+}
+
+func (h *AdminHandler) RegisterRoutes(mux *http.ServeMux) {
+	adminAuth := func(handler http.HandlerFunc) http.Handler { return h.AuthMiddleware(handler) }
 	mux.Handle("POST /admin/keys", adminAuth(h.HandleCreateKey))
 	mux.Handle("GET /admin/keys", adminAuth(h.HandleListKeys))
 	mux.Handle("POST /admin/keys/{id}/revoke", adminAuth(h.HandleRevokeKey))
+	mux.Handle("GET /admin/keys/{id}/reveal", adminAuth(h.HandleRevealKey))
+	mux.Handle("DELETE /admin/keys/{id}", adminAuth(h.HandleDeleteKey))
 }

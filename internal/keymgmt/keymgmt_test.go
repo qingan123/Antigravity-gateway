@@ -51,6 +51,9 @@ func TestKeyManagerLifecycle(t *testing.T) {
 	if res.Key == "" || res.ID == "" {
 		t.Fatalf("invalid create key result: %+v", res)
 	}
+	if got, err := mgr.RevealKey(res.ID); err != nil || got != res.Key {
+		t.Fatalf("failed to reveal encrypted key: got %q err %v", got, err)
+	}
 
 	// 3. Test Dynamic Key Auth
 	infoDyn, err := mgr.Authenticate(res.Key)

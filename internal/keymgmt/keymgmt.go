@@ -1,6 +1,8 @@
 package keymgmt
 
 import (
+	"crypto/aes"
+	"crypto/cipher"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
@@ -43,6 +45,8 @@ type KeyInfo struct {
 	RevokedAt     int64    `json:"revoked_at,omitempty"`
 	Status        string   `json:"status"` // active, revoked, expired
 	IsStatic      bool     `json:"is_static"`
+	CanReveal     bool     `json:"can_reveal"`
+	encryptedKey  string
 }
 
 type CreateKeyResult struct {
@@ -68,6 +72,44 @@ type Manager struct {
 	staticKeys []config.StaticKeyConfig
 	snapshot   atomic.Pointer[KeySnapshot]
 	writeMu    sync.Mutex
+}
+
+func (m *Manager) cipher() (cipher.AEAD, error) {
+	seed := sha256.Sum256(m.hmacSecret)
+	block, err := aes.NewCipher(seed[:])
+	if err != nil {
+		return nil, err
+	}
+	return cipher.NewGCM(block)
+}
+
+func (m *Manager) encryptKey(raw string) (string, error) {
+	aead, err := m.cipher()
+	if err != nil {
+		return "", err
+	}
+	nonce := make([]byte, aead.NonceSize())
+	if _, err := rand.Read(nonce); err != nil {
+		return "", err
+	}
+	sealed := aead.Seal(nonce, nonce, []byte(raw), nil)
+	return base64.RawURLEncoding.EncodeToString(sealed), nil
+}
+
+func (m *Manager) decryptKey(value string) (string, error) {
+	aead, err := m.cipher()
+	if err != nil {
+		return "", err
+	}
+	sealed, err := base64.RawURLEncoding.DecodeString(value)
+	if err != nil || len(sealed) < aead.NonceSize() {
+		return "", errors.New("invalid encrypted key")
+	}
+	plain, err := aead.Open(nil, sealed[:aead.NonceSize()], sealed[aead.NonceSize():], nil)
+	if err != nil {
+		return "", errors.New("invalid encrypted key")
+	}
+	return string(plain), nil
 }
 
 func NewManager(dbPath string, hmacSecret string, staticKeys []config.StaticKeyConfig) (*Manager, error) {
@@ -102,6 +144,7 @@ func NewManager(dbPath string, hmacSecret string, staticKeys []config.StaticKeyC
 		id TEXT PRIMARY KEY,
 		key_prefix TEXT NOT NULL,
 		hmac_hash TEXT NOT NULL UNIQUE,
+		encrypted_key TEXT,
 		name TEXT NOT NULL,
 		allowed_models TEXT,
 		created_at INTEGER NOT NULL,
@@ -110,11 +153,16 @@ func NewManager(dbPath string, hmacSecret string, staticKeys []config.StaticKeyC
 		status TEXT NOT NULL
 	);
 	CREATE INDEX IF NOT EXISTS idx_downstream_keys_hmac ON downstream_keys(hmac_hash);
+	CREATE TABLE IF NOT EXISTS key_migrations (
+		hmac_hash TEXT PRIMARY KEY,
+		migrated_at INTEGER NOT NULL
+	);
 	`
 	if _, err := db.Exec(schema); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("failed to initialize db schema: %w", err)
 	}
+	_, _ = db.Exec(`ALTER TABLE downstream_keys ADD COLUMN encrypted_key TEXT`)
 
 	m := &Manager{
 		db:         db,
@@ -129,6 +177,77 @@ func NewManager(dbPath string, hmacSecret string, staticKeys []config.StaticKeyC
 	}
 
 	return m, nil
+}
+
+func (m *Manager) ImportStaticKeys() error {
+	m.writeMu.Lock()
+	defer m.writeMu.Unlock()
+	for _, sk := range m.staticKeys {
+		if strings.TrimSpace(sk.Key) == "" {
+			continue
+		}
+		hash := m.HashKey(sk.Key)
+		var migrated int
+		if err := m.db.QueryRow(`SELECT COUNT(1) FROM key_migrations WHERE hmac_hash = ?`, hash).Scan(&migrated); err != nil {
+			return err
+		}
+		if migrated > 0 {
+			continue
+		}
+		enc, err := m.encryptKey(sk.Key)
+		if err != nil {
+			return err
+		}
+		prefix := sk.Key
+		if len(prefix) > 12 {
+			prefix = prefix[:12] + "..."
+		}
+		id := sk.ID
+		if id == "" {
+			id = "key_" + hex.EncodeToString([]byte(hash[:8]))
+		}
+		var exists int
+		if err := m.db.QueryRow(`SELECT COUNT(1) FROM downstream_keys WHERE hmac_hash = ?`, hash).Scan(&exists); err != nil {
+			return err
+		}
+		if exists == 0 {
+			if _, err = m.db.Exec(`INSERT INTO downstream_keys (id,key_prefix,hmac_hash,encrypted_key,name,allowed_models,created_at,status) VALUES (?,?,?,?,?,?,?, 'active')`, id, prefix, hash, enc, sk.Name, nullableStrings(sk.AllowedModels), time.Now().Unix()); err != nil {
+				return err
+			}
+		}
+		if _, err = m.db.Exec(`INSERT INTO key_migrations (hmac_hash,migrated_at) VALUES (?,?)`, hash, time.Now().Unix()); err != nil {
+			return err
+		}
+	}
+	m.staticKeys = nil
+	return m.reloadSnapshot()
+}
+
+func nullableStrings(values []string) sql.NullString {
+	if len(values) == 0 {
+		return sql.NullString{}
+	}
+	b, _ := json.Marshal(values)
+	return sql.NullString{String: string(b), Valid: true}
+}
+
+func (m *Manager) RevealKey(id string) (string, error) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return "", ErrKeyNotFound
+	}
+	snap := m.snapshot.Load()
+	if snap == nil {
+		return "", ErrKeyNotFound
+	}
+	info, ok := snap.byID[id]
+	if !ok || info.Status != "active" {
+		return "", ErrKeyNotFound
+	}
+	if info.encryptedKey == "" {
+		return "", errors.New("key cannot be revealed")
+	}
+	return m.decryptKey(info.encryptedKey)
 }
 
 func (m *Manager) Close() error {
@@ -166,6 +285,7 @@ func (m *Manager) reloadSnapshot() error {
 			ExpiresAt:     0,
 			Status:        "active",
 			IsStatic:      true,
+			CanReveal:     false,
 		}
 		if _, exists := byID[info.ID]; exists {
 			return fmt.Errorf("duplicate static key ID: %q", info.ID)
@@ -176,7 +296,7 @@ func (m *Manager) reloadSnapshot() error {
 	}
 
 	// 2. Read dynamic keys from DB
-	rows, err := m.db.Query(`SELECT id, key_prefix, hmac_hash, name, allowed_models, created_at, expires_at, revoked_at, status FROM downstream_keys`)
+	rows, err := m.db.Query(`SELECT id, key_prefix, hmac_hash, encrypted_key, name, allowed_models, created_at, expires_at, revoked_at, status FROM downstream_keys`)
 	if err != nil {
 		return err
 	}
@@ -185,11 +305,11 @@ func (m *Manager) reloadSnapshot() error {
 	now := time.Now().Unix()
 	for rows.Next() {
 		var id, keyPrefix, hmacHash, name, status string
-		var allowedModelsJSON sql.NullString
+		var encryptedKey, allowedModelsJSON sql.NullString
 		var createdAt int64
 		var expiresAt, revokedAt sql.NullInt64
 
-		if err := rows.Scan(&id, &keyPrefix, &hmacHash, &name, &allowedModelsJSON, &createdAt, &expiresAt, &revokedAt, &status); err != nil {
+		if err := rows.Scan(&id, &keyPrefix, &hmacHash, &encryptedKey, &name, &allowedModelsJSON, &createdAt, &expiresAt, &revokedAt, &status); err != nil {
 			return err
 		}
 
@@ -211,9 +331,21 @@ func (m *Manager) reloadSnapshot() error {
 			rev = revokedAt.Int64
 		}
 
-		// Check conflict with static key
-		if _, exists := byID[id]; exists {
-			return fmt.Errorf("dynamic key ID %q conflicts with static key", id)
+		// A migrated static key can temporarily coexist with its original
+		// static definition during startup. The database copy is authoritative.
+		if existing, exists := byID[id]; exists {
+			if existing.IsStatic && existing.HMACHash == hmacHash {
+				delete(byHash, existing.HMACHash)
+				delete(byID, existing.ID)
+				for i, item := range all {
+					if item == existing {
+						all = append(all[:i], all[i+1:]...)
+						break
+					}
+				}
+			} else {
+				return fmt.Errorf("dynamic key ID %q conflicts with static key", id)
+			}
 		}
 
 		info := &KeyInfo{
@@ -227,6 +359,8 @@ func (m *Manager) reloadSnapshot() error {
 			RevokedAt:     rev,
 			Status:        status,
 			IsStatic:      false,
+			CanReveal:     encryptedKey.Valid && encryptedKey.String != "",
+			encryptedKey:  encryptedKey.String,
 		}
 
 		byHash[hmacHash] = info
@@ -327,14 +461,18 @@ func (m *Manager) CreateKey(name string, expiresAt int64, allowedModels []string
 	if expiresAt > 0 {
 		expSQL = sql.NullInt64{Int64: expiresAt, Valid: true}
 	}
+	encryptedKey, err := m.encryptKey(fullKey)
+	if err != nil {
+		return nil, fmt.Errorf("failed to encrypt key: %w", err)
+	}
 
 	m.writeMu.Lock()
 	defer m.writeMu.Unlock()
 
-	_, err := m.db.Exec(`
-		INSERT INTO downstream_keys (id, key_prefix, hmac_hash, name, allowed_models, created_at, expires_at, status)
-		VALUES (?, ?, ?, ?, ?, ?, ?, 'active')
-	`, keyID, keyPrefix, hmacHash, name, allowedModelsJSON, now, expSQL)
+	_, err = m.db.Exec(`
+		INSERT INTO downstream_keys (id, key_prefix, hmac_hash, encrypted_key, name, allowed_models, created_at, expires_at, status)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active')
+	`, keyID, keyPrefix, hmacHash, encryptedKey, name, allowedModelsJSON, now, expSQL)
 	if err != nil {
 		return nil, fmt.Errorf("failed to insert key into db: %w", err)
 	}
@@ -373,9 +511,28 @@ func (m *Manager) ListKeys() []*KeyInfo {
 			RevokedAt:     k.RevokedAt,
 			Status:        k.Status,
 			IsStatic:      k.IsStatic,
+			CanReveal:     k.CanReveal,
 		}
 	}
 	return result
+}
+
+func (m *Manager) DeleteKey(id string) error {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return ErrKeyNotFound
+	}
+	m.writeMu.Lock()
+	defer m.writeMu.Unlock()
+	res, err := m.db.Exec(`DELETE FROM downstream_keys WHERE id = ?`, id)
+	if err != nil {
+		return fmt.Errorf("failed to delete key: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil || n == 0 {
+		return ErrKeyNotFound
+	}
+	return m.reloadSnapshot()
 }
 
 func (m *Manager) RevokeKey(id string) error {

@@ -1,0 +1,65 @@
+Antigravity Gateway unified runtime configuration and mobile-style UI
+
+CHANGED_BRANCH/FIELDS:
+- /admin mobile card-style management UI, administrator login, 30-minute client session timeout, no start/stop control.
+- Runtime upstream base_url/api_key/auth_mode with hot update.
+- Unified downstream-key database with encrypted reveal copy, physical delete, and migrated configured key.
+- CLI subcommands under /app/server sharing the same manager/config modules.
+
+MODIFIED_FILE:
+- /tmp/Antigravity-gateway/internal/adminui/ui.go
+- /tmp/Antigravity-gateway/internal/cli/cli.go
+- /tmp/Antigravity-gateway/internal/config/config.go
+- /tmp/Antigravity-gateway/internal/config/runtime.go
+- /tmp/Antigravity-gateway/internal/keymgmt/keymgmt.go
+- /tmp/Antigravity-gateway/internal/keymgmt/admin_handler.go
+- /tmp/Antigravity-gateway/internal/keymgmt/keymgmt_test.go
+- /tmp/Antigravity-gateway/internal/proxy/client.go
+- /tmp/Antigravity-gateway/cmd/gateway/main.go
+
+DIFF_FILE:
+- /tmp/Antigravity-gateway/DIFF_FILE
+
+ROLLBACK_FILE:
+- /tmp/Antigravity-gateway/ROLLBACK.sh
+
+BASELINE:
+COMMAND: docker inspect antigravity-gateway; curl -fsS http://127.0.0.1:8081/healthz; sha256sum /opt/antigravity-gateway/data/keys.sqlite
+RESULT: baseline image antigravity-gateway:baseline-d42af9a; health HTTP 200 with {"status":"ok","version":"1.0.7"}; database SHA-256 c9f40fae28c8bcb76412ce4cb3f7e6b152fd019b6c20b3f25a01579649de7262.
+EXIT: 0
+
+MODIFIED:
+COMMAND: docker run --rm -v /tmp/Antigravity-gateway:/src -w /src golang:1.25-alpine sh -c 'gofmt -w ... && go test ./... && go build ./cmd/gateway'
+RESULT: all Go packages passed and gateway build passed, including internal/keymgmt encrypted reveal tests.
+EXIT: 0
+
+COMMAND: docker build -t antigravity-gateway:mobile-ui-unified .
+RESULT: image built successfully; image ID sha256:908ab18a27122198f09b16a121a3e59a002360c4d572995772af8be2b3a6f433.
+EXIT: 0
+
+COMMAND: docker run -d --name antigravity-gateway --restart unless-stopped --env-file /opt/antigravity-gateway/.env --add-host host.docker.internal:host-gateway -p 8081:8080 -v /opt/antigravity-gateway/data:/app/data antigravity-gateway:mobile-ui-unified
+RESULT: container running; restart policy unless-stopped; port 8081->8080; data mount preserved.
+EXIT: 0
+
+COMMAND: curl -sS http://127.0.0.1:8081/healthz; curl -sS http://127.0.0.1:8081/readyz; curl -o /tmp/admin -w '%{http_code}' http://127.0.0.1:8081/admin
+RESULT: health HTTP 200 {"status":"ok","version":"1.0.7"}; ready HTTP 200 {"status":"ready","version":"1.0.7"}; admin HTTP 200, HTML 10454 bytes.
+EXIT: 0
+
+COMMAND: authenticated browser login at /admin; authenticated GET /admin/keys; authenticated GET /admin/keys/{id}/reveal
+RESULT: login succeeded; one migrated active key was listed with masked prefix; reveal returned HTTP 200 and a non-empty key without recording the key value.
+EXIT: 0
+
+COMMAND: wrong-password CLI test: printf 'wrong\\n' | docker exec -i antigravity-gateway /app/server key list
+RESULT: exit 1; password prompt appeared; no container restart; no secret value logged.
+EXIT: 1 (expected rejection)
+
+ROLLBACK:
+COMMAND: /tmp/Antigravity-gateway/ROLLBACK.sh
+RESULT: source rollback script is executable and restores tracked source to HEAD plus removes added UI/CLI/artifact files. Runtime rollback requires restoring the previous image tag and restarting only antigravity-gateway; data mount is retained.
+STATUS: prepared; not executed against the live container.
+
+FINAL_STATE:
+- Live image: antigravity-gateway:mobile-ui-unified.
+- Live container: running, restart_count=0.
+- Live data database SHA-256: 755821a511162123201ac9798a6aa14c673ca5c056e8f6d55f2035912d14d09e.
+- DS2API and Mail Hub were not changed.

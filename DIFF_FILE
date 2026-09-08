@@ -1,0 +1,8 @@
+Antigravity Gateway unified runtime management
+
+MODIFIED_FILE: pending implementation
+DIFF_FILE: /tmp/Antigravity-gateway/DIFF_FILE
+VERIFICATION.txt: /tmp/Antigravity-gateway/VERIFICATION.txt
+ROLLBACK.sh: /tmp/Antigravity-gateway/ROLLBACK.sh
+
+Goal: official-compatible UI and CLI share runtime config and downstream-key manager; UI uses the supplied mobile card layout; no server start/stop control in the UI.

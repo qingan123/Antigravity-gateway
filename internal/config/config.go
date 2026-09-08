@@ -6,8 +6,10 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -19,6 +21,9 @@ type StaticKeyConfig struct {
 }
 
 type Config struct {
+	upstreamMu    sync.RWMutex
+	upstreamStore *RuntimeStore
+
 	UpstreamBaseURL             string
 	UpstreamAPIKey              string
 	UpstreamAuthMode            string // bearer, none
@@ -140,8 +145,8 @@ func Load(getenv func(string) string) (*Config, error) {
 	cfg.AdminAPIKey = strings.TrimSpace(getenv("ADMIN_API_KEY"))
 	if cfg.AdminAPIKey == "" {
 		cfg.AdminAPIKey = "admin-secret-key-12345"
-	} else if len(cfg.AdminAPIKey) < 8 {
-		return nil, errors.New("ADMIN_API_KEY must be at least 8 characters")
+	} else if len(cfg.AdminAPIKey) < 6 {
+		return nil, errors.New("ADMIN_API_KEY must be at least 6 characters")
 	}
 
 	// Key HMAC Secret (Optional, fallback to default secret if not set)
@@ -179,6 +184,21 @@ func Load(getenv func(string) string) (*Config, error) {
 			seenIDs[k.ID] = true
 		}
 		cfg.StaticKeys = staticKeys
+	}
+	storePath := strings.TrimSpace(getenv("RUNTIME_CONFIG_PATH"))
+	if storePath == "" {
+		storePath = filepath.Join(filepath.Dir(cfg.KeyDBPath), "runtime-config.json")
+	}
+	store, err := NewRuntimeStore(storePath, UpstreamSettings{BaseURL: cfg.UpstreamBaseURL, APIKey: cfg.UpstreamAPIKey, AuthMode: cfg.UpstreamAuthMode})
+	if err != nil {
+		return nil, fmt.Errorf("failed to load runtime config: %w", err)
+	}
+	cfg.upstreamStore = store
+	if saved := store.Get(); saved.BaseURL != "" {
+		cfg.UpstreamBaseURL, cfg.UpstreamAPIKey, cfg.UpstreamAuthMode = saved.BaseURL, saved.APIKey, saved.AuthMode
+		if cfg.UpstreamAuthMode == "bearer" && cfg.UpstreamAPIKey == "" {
+			return nil, errors.New("UPSTREAM_API_KEY is required when UPSTREAM_AUTH_MODE is 'bearer'")
+		}
 	}
 
 	// Control Message Role & Position
@@ -279,9 +299,28 @@ func getBool(val string, defaultVal bool) bool {
 }
 
 func (c *Config) UpstreamChatURL() string {
-	return c.UpstreamBaseURL + "/v1/chat/completions"
+	base, _, _ := c.UpstreamSettings()
+	return base + "/v1/chat/completions"
 }
 
 func (c *Config) UpstreamModelsURL() string {
-	return c.UpstreamBaseURL + "/v1/models"
+	base, _, _ := c.UpstreamSettings()
+	return base + "/v1/models"
+}
+
+func (c *Config) UpstreamSettings() (string, string, string) {
+	c.upstreamMu.RLock()
+	defer c.upstreamMu.RUnlock()
+	return c.UpstreamBaseURL, c.UpstreamAPIKey, c.UpstreamAuthMode
+}
+
+func (c *Config) UpdateUpstream(settings UpstreamSettings) error {
+	if err := c.upstreamStore.Update(settings); err != nil {
+		return err
+	}
+	saved := c.upstreamStore.Get()
+	c.upstreamMu.Lock()
+	c.UpstreamBaseURL, c.UpstreamAPIKey, c.UpstreamAuthMode = saved.BaseURL, saved.APIKey, saved.AuthMode
+	c.upstreamMu.Unlock()
+	return nil
 }

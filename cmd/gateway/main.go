@@ -8,6 +8,8 @@ import (
 	"strings"
 	"time"
 
+	"antigravity-gateway/internal/adminui"
+	"antigravity-gateway/internal/cli"
 	"antigravity-gateway/internal/config"
 	"antigravity-gateway/internal/keymgmt"
 	"antigravity-gateway/internal/logger"
@@ -140,6 +142,17 @@ func main() {
 		slog.Error("failed to initialize key manager", "err", err)
 		os.Exit(1)
 	}
+	if err := keyMgr.ImportStaticKeys(); err != nil {
+		slog.Error("failed to import configured keys", "err", err)
+		os.Exit(1)
+	}
+	if handled, cliErr := cli.Run(os.Args[1:], cfg, keyMgr); handled {
+		if cliErr != nil {
+			slog.Error("CLI command failed", "err", cliErr)
+			os.Exit(1)
+		}
+		return
+	}
 	defer keyMgr.Close()
 
 	// 2. Initialize Upstream Client
@@ -176,8 +189,12 @@ func main() {
 	// Proxy Routes (/v1/models, /v1/chat/completions, /v1/*)
 	proxyHandler.RegisterRoutes(mux)
 
-	// Admin Routes (/admin/keys)
+	// Admin Routes (/admin/keys and the mobile-style management UI)
 	adminHandler.RegisterRoutes(mux)
+	mux.Handle("GET /admin/runtime", adminHandler.AuthMiddleware(adminui.RuntimeHandler(cfg)))
+	mux.Handle("PUT /admin/runtime", adminHandler.AuthMiddleware(adminui.RuntimeUpdateHandler(cfg)))
+	mux.HandleFunc("GET /admin", adminui.Handler)
+	mux.HandleFunc("GET /admin/", adminui.Handler)
 
 	handlerWithMiddlewares := detailedLoggingMiddleware(mux)
 

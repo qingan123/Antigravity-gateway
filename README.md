@@ -1,5 +1,24 @@
 # Antigravity Gateway (OpenAI Chat 防截断兼容网关)
 
+## 一键部署 / 更新 / 卸载（Linux + Docker）
+
+> 以下命令会从本仓库下载脚本。部署脚本会交互询问宿主机端口、上游地址、上游 Key、管理员 Key 和 HMAC Secret；敏感值不会回显。默认保留 `/opt/antigravity-gateway/data` 数据目录。
+
+```bash
+# 一键部署（可交互端口和配置）
+curl -fsSL https://raw.githubusercontent.com/qingan123/Antigravity-gateway/main/deploy.sh -o /tmp/antigravity-deploy.sh && sudo bash /tmp/antigravity-deploy.sh
+
+# 一键更新（保留 .env、端口和 data 数据）
+curl -fsSL https://raw.githubusercontent.com/qingan123/Antigravity-gateway/main/update.sh -o /tmp/antigravity-update.sh && sudo bash /tmp/antigravity-update.sh
+
+# 一键卸载（容器和程序文件；默认保留 .env 与 data）
+curl -fsSL https://raw.githubusercontent.com/qingan123/Antigravity-gateway/main/uninstall.sh -o /tmp/antigravity-uninstall.sh && sudo bash /tmp/antigravity-uninstall.sh
+```
+
+部署后管理页面：`http://你的服务器IP:端口/admin`；客户端地址：`http://你的服务器IP:端口/v1`。
+
+---
+
 <p align="center">
   <img src="https://img.shields.io/badge/Go-1.25+-00ADD8?style=flat-square&logo=go" alt="Go Version">
   <img src="https://img.shields.io/badge/License-MIT-green.svg?style=flat-square" alt="License">
