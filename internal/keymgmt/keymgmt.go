@@ -446,8 +446,8 @@ func (m *Manager) CreateKey(name string, expiresAt int64, allowedModels []string
 	}
 	secret := base64.RawURLEncoding.EncodeToString(secretBytes)
 
-	fullKey := fmt.Sprintf("agw_sk_%s_%s", keyID, secret)
-	keyPrefix := fmt.Sprintf("agw_sk_%s...", keyID)
+	fullKey := fmt.Sprintf("sk-%s-%s", keyID, secret)
+	keyPrefix := fmt.Sprintf("sk-%s...", keyID)
 	hmacHash := m.HashKey(fullKey)
 	now := time.Now().Unix()
 
